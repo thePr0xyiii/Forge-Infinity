@@ -1,0 +1,186 @@
+-- ForgeStationHandler.client.lua
+-- Parent: StarterPlayerScripts
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local camera = Workspace.CurrentCamera
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- 1. Get GUIs
+local forgeGui = playerGui:WaitForChild("ForgeGui", 5)
+local fadeGui = playerGui:WaitForChild("FadeGui", 5) 
+local blackFrame = fadeGui and fadeGui:WaitForChild("BlackFrame")
+
+if not forgeGui then warn("⚠️ ForgeGui missing!") end
+
+-- 2. Setup Remotes
+local remoteFolder = ReplicatedStorage:WaitForChild("RemoteEvents", 10)
+if not remoteFolder then warn("❌ RemoteEvents folder missing!") return end
+local forgeEvent = remoteFolder:WaitForChild("ForgeEvent", 10)
+
+-- 3. Config
+local TELEPORT_OFFSET_Y = 3.5
+local IDLE_ANIM_ID = "rbxassetid://507766388"
+local HAMMER_ANIM_ID = "rbxassetid://507768375"
+
+-- State
+local isForging = false
+local currentAnvil = nil
+local currentPrompt = nil -- Store prompt to re-enable later
+local originalCamCFrame = nil
+local loadedIdle = nil
+local loadedHammer = nil
+
+-- --- HELPER: FADE ---
+local function fadeScreen(goalTransparency, duration)
+	if not fadeGui or not blackFrame then return end
+	fadeGui.Enabled = true
+	blackFrame.Visible = true
+	local tween = TweenService:Create(blackFrame, TweenInfo.new(duration), {BackgroundTransparency = goalTransparency})
+	tween:Play()
+	tween.Completed:Wait()
+	if goalTransparency == 1 then 
+		blackFrame.Visible = false
+		fadeGui.Enabled = false
+	end
+end
+
+-- --- HELPER: ANIM ---
+local function playAnim(animId, loop)
+	local char = player.Character
+	if not char then return nil end
+	local humanoid = char:FindFirstChild("Humanoid")
+	local animator = humanoid and humanoid:FindFirstChild("Animator")
+	if not animator then return nil end
+
+	local anim = Instance.new("Animation")
+	anim.AnimationId = animId
+	local track = animator:LoadAnimation(anim)
+	track.Looped = loop
+	track.Priority = Enum.AnimationPriority.Action
+	track:Play()
+	return track
+end
+
+-- --- ENTER FORGE MODE ---
+local function enterForgeMode(anvilModel, prompt)
+	if isForging then return end
+	isForging = true
+	currentAnvil = anvilModel
+	currentPrompt = prompt
+
+	-- 1. Disable Prompt
+	if currentPrompt then currentPrompt.Enabled = false end
+
+	local char = player.Character
+	if not char then return end
+	local hrp = char:WaitForChild("HumanoidRootPart")
+	local hum = char:WaitForChild("Humanoid")
+
+	-- 2. Freeze
+	hum.WalkSpeed = 0
+	hum.JumpPower = 0
+	hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+
+	-- 3. Fade Out
+	fadeScreen(0, 0.5)
+
+	-- 4. Teleport (Robust Check)
+	local standPart = anvilModel:FindFirstChild("StandPos") or Workspace:FindFirstChild("StandPos")
+
+	if standPart then
+		local targetPos = standPart.Position + Vector3.new(0, TELEPORT_OFFSET_Y, 0)
+		local lookAt = anvilModel.PrimaryPart and anvilModel.PrimaryPart.Position or standPart.Position
+		local finalCFrame = CFrame.new(targetPos, Vector3.new(lookAt.X, targetPos.Y, lookAt.Z))
+
+		-- Force Pivot Twice
+		char:PivotTo(finalCFrame)
+		RunService.Heartbeat:Wait()
+		char:PivotTo(finalCFrame)
+		hrp.Anchored = true
+	else
+		warn("❌ 'StandPos' not found anywhere!")
+	end
+
+	-- 5. Camera
+	camera.CameraType = Enum.CameraType.Scriptable
+	originalCamCFrame = camera.CFrame
+	local camPart = Workspace:FindFirstChild("CamPart_Forge")
+	if camPart then camera.CFrame = camPart.CFrame end
+
+	-- 6. Start Idle & Show GUI
+	loadedIdle = playAnim(IDLE_ANIM_ID, true)
+	task.wait(0.2)
+	fadeScreen(1, 0.5)
+	if forgeGui then forgeGui.Enabled = true end
+end
+
+-- --- EXIT FORGE MODE ---
+local function exitForgeMode()
+	isForging = false
+	if forgeGui then forgeGui.Enabled = false end
+
+	fadeScreen(0, 0.5)
+
+	local char = player.Character
+	if char then
+		local hum = char:FindFirstChild("Humanoid")
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+
+		if hrp then hrp.Anchored = false end
+		if hum then
+			hum.WalkSpeed = 16
+			hum.JumpPower = 50
+			hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+		end
+		if loadedIdle then loadedIdle:Stop() end
+	end
+
+	camera.CameraType = Enum.CameraType.Custom
+
+	-- Re-enable Prompt
+	if currentPrompt then 
+		currentPrompt.Enabled = true 
+		currentPrompt = nil
+	end
+
+	fadeScreen(1, 0.5)
+end
+
+-- --- CONNECT PROMPTS ---
+local function connectPrompt(prompt)
+	if prompt.Name == "ForgePrompt" then
+		if prompt:GetAttribute("Connected") then return end
+		prompt:SetAttribute("Connected", true)
+
+		prompt.Triggered:Connect(function(plr)
+			if plr == player then
+				local anvilModel = prompt.Parent.Parent
+				if anvilModel then
+					enterForgeMode(anvilModel, prompt) -- Pass prompt!
+				end
+			end
+		end)
+	end
+end
+
+for _, desc in pairs(workspace:GetDescendants()) do
+	if desc:IsA("ProximityPrompt") then connectPrompt(desc) end
+end
+workspace.DescendantAdded:Connect(function(desc)
+	if desc:IsA("ProximityPrompt") then connectPrompt(desc) end
+end)
+
+-- --- GUI BUTTONS ---
+if forgeGui then
+	local frame = forgeGui:WaitForChild("Frame", 5)
+	if frame then
+		local exitBtn = frame:FindFirstChild("ExitButton")
+		if exitBtn then exitBtn.MouseButton1Click:Connect(exitForgeMode) end
+	end
+end
